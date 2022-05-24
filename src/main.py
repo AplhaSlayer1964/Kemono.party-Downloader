@@ -532,13 +532,13 @@ class downloader:
     def load_archive(self):
         # load archived posts
         if self.archive_file and os.path.exists(self.archive_file):
-            with open(self.archive_file,'r') as f:
+            with open(self.archive_file,'r', encoding="utf-8") as f:
                 self.archive_list = f.read().splitlines()
 
     def write_archive(self, post:dict):
         if self.archive_file and self.post_errors == 0 and not self.simulate:
-            with open(self.archive_file,'a') as f:
-                f.write("https://{site}/{service}/user/{user_id}/post/{id}".format(**post['post_variables']) + '\n')
+            with open(self.archive_file,'a', encoding="utf-8") as f:
+                f.write("{service} {username}({user_id}) {title} ({id})".format(**post['post_variables']) + '\n')
 
     def skip_user(self, user:dict):
         # check last update date
@@ -551,7 +551,7 @@ class downloader:
     def skip_post(self, post:dict):
         # check if the post should be downloaded
         if self.archive_file:
-            if "https://{site}/{service}/user/{user_id}/post/{id}".format(**post['post_variables']) in self.archive_list:
+            if "{service} {username}({user_id}) {title} ({id})".format(**post['post_variables']) in self.archive_list:
                 logger.info("Skipping post | post already archived")
                 return True
 
