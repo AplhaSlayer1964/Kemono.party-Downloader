@@ -2,10 +2,17 @@ import re
 import hashlib
 import os
 import time
+import requests
+from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+
+from .args import get_args
+from .logger import logger
+
+running_args = get_args()
 
 def parse_url(url):
     # parse urls
-    downloadable = re.search(r'^https://(kemono\.party|coomer\.party)/([^/]+)/user/([^/]+)($|/post/([^/]+)$)',url)
+    downloadable = re.search(r'^https://((?:kemono|coomer)\.(?:party|su))/([^/]+)/user/([^/]+)($|/post/([^/]+)$)',url)
     if not downloadable:
         return None
     return downloadable.group(1)
@@ -13,9 +20,11 @@ def parse_url(url):
 # create path from template pattern
 def compile_post_path(post_variables, template, ascii):
     drive, tail = os.path.splitdrive(template)
-    tail = tail[1:] if tail[0] in {'/','\\'} else tail
+    tail_trimmed = tail[0] in {'/','\\'}
+    tail = tail[1:] if tail_trimmed else tail
     tail_split = re.split(r'\\|/', tail)
-    cleaned_path = drive + os.path.sep if drive else ''
+    cleaned_path = (drive + os.path.sep if drive else 
+                    (os.path.sep if tail_trimmed else ''))
     for folder in tail_split:
         if ascii:
             cleaned_path = os.path.join(cleaned_path, restrict_ascii(clean_folder_name(folder.format(**post_variables))))
@@ -87,7 +96,7 @@ def print_download_bar(total:int, downloaded:int, resumed:int, start):
 
     rate = (downloaded-resumed)/time_diff
 
-    eta = time.strftime("%H:%M:%S", time.gmtime((total-downloaded) / rate))
+    eta = time.strftime("%H:%M:%S", time.gmtime((total-downloaded) / rate)) if rate else '99:99:99'
 
     if rate/2**10 < 100:
         rate = (round(rate/2**10, 1), 'KB')
@@ -142,3 +151,56 @@ def print_download_bar(total:int, downloaded:int, resumed:int, start):
 #     if current_version < latest_version:
 #         logger.debug(f"Using kemono-dl {__version__} while latest release is kemono-dl {latest_tag}")
 #         logger.warning(f"A newer version of kemono-dl is available. Please update to the latest release at https://github.com/AplhaSlayer1964/kemono-dl/releases/latest")
+
+
+# doesn't support multithreading
+def function_rate_limit(func):
+    last_call_times = {}
+
+    def wrapper(*args, **kwargs):
+        nonlocal last_call_times
+        func_name = func.__name__
+        t = time.time()
+        last_call_time = last_call_times.get(func_name, 0)
+        if (t - last_call_time) * 1000 < running_args['ratelimit_ms']:
+            time.sleep(running_args['ratelimit_ms'] / 1000 - (t - last_call_time))
+        last_call_times[func_name] = time.time()
+        return func(*args, **kwargs)
+
+    return wrapper
+
+class RefererSession(requests.Session):
+    def __init__(self, *args, **kwargs):
+        self.proxy_agent = kwargs.pop('proxy_agent', None)
+        self.max_retries_429 = kwargs.pop('max_retries_429', 3)
+        self.sleep_429 = kwargs.pop('sleep_429', 120)
+
+        super().__init__(*args, **kwargs)
+
+    def rebuild_auth(self, prepared_request, response):
+        super().rebuild_auth(prepared_request, response)
+        u = urlparse(response.url)
+        prepared_request.headers["Referer"] = f'{u.scheme}://{u.netloc}/'
+
+    @function_rate_limit
+    def get(self, url, **kwargs):
+        old_url = url
+        retry_429 = kwargs.pop('retry_429', True)
+        max_retries_429 = kwargs.pop('max_retries_429', self.max_retries_429)
+        
+        if self.proxy_agent:
+            u = urlparse(self.proxy_agent)
+            q_params = parse_qs(u.query)
+            q_params['u'] = url
+            u = u._replace(query=urlencode(q_params))
+            url = urlunparse(u)
+
+        resp = super().get(url, **kwargs)
+        max_retries_429 -= 1
+        if resp.status_code != 429 or not retry_429 or max_retries_429 < 1:
+            return resp
+
+        # need retry
+        logger.warning(f"Failed to access: {url if self.proxy_agent else old_url} | {resp.status_code} Too Many Requests | Sleeping for {self.sleep_429} seconds")
+        time.sleep(self.sleep_429)
+        return self.get(old_url, retry_429=retry_429, max_retries_429=max_retries_429, **kwargs)

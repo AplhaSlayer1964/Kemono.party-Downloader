@@ -3,6 +3,7 @@ import datetime
 import re
 import argparse
 from http.cookiejar import MozillaCookieJar, LoadError
+from urllib.parse import urlparse, urlunparse
 
 from .version import __version__
 
@@ -26,19 +27,19 @@ def get_args():
 
     ap.add_argument("--kemono-fav-users",
                     metavar="SERVICE", type=str, default=None,
-                    help="Downloads favorite users from kemono.party of specified type or types separated by a comma. Types include: all, patreon, fanbox, gumroad, subscribestar, dlsite, fantia. Your cookie file must have been gotten while logged in to work.")
+                    help="Downloads favorite users from kemono.party/su of specified type or types separated by a comma. Types include: all, patreon, fanbox, gumroad, subscribestar, dlsite, fantia. Your cookie file must have been gotten while logged in to work.")
 
     ap.add_argument("--coomer-fav-users",
                     metavar="SERVICE", type=str, default=None,
-                    help="Downloads favorite users from coomer.party of specified type or types separated by a comma. Types include: all, onlyfans. Your cookie file must have been gotten while logged in to work.")
+                    help="Downloads favorite users from coomer.party/su of specified type or types separated by a comma. Types include: all, onlyfans. Your cookie file must have been gotten while logged in to work.")
 
     ap.add_argument("--kemono-fav-posts",
                     action='store_true', default=False,
-                    help="Downloads favorite posts from kemono.party. Your cookie file must have been gotten while logged in to work.")
+                    help="Downloads favorite posts from kemono.party/su. Your cookie file must have been gotten while logged in to work.")
 
     ap.add_argument("--coomer-fav-posts",
                     action='store_true', default=False,
-                    help="Downloads favorite posts from coomer.party. Your cookie file must have been gotten while logged in to work.")
+                    help="Downloads favorite posts from coomer.party/su. Your cookie file must have been gotten while logged in to work.")
 
 
 
@@ -81,6 +82,10 @@ def get_args():
     ap.add_argument("--skip-attachments",
                     action='store_true', default=False,
                     help="Do not download post attachments.")
+
+    ap.add_argument("--skip-local-hash",
+                    action='store_true', default=False,
+                    help="Do not check hash for downloaded local files.")
 
     ap.add_argument("--overwrite",
                     action='store_true', default=False,
@@ -196,20 +201,31 @@ def get_args():
                     metavar="SEC", type=int, default=120,
                     help="The time in seconds to wait after being ratelimited (default: 120)")
 
+    ap.add_argument("--ratelimit-ms",
+                    metavar="MS", type=int, default=300,
+                    help="The time in millisecond to limit before next request (default: 300)")
+
     ap.add_argument("--user-agent",
                     metavar="UA", type=str, default='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
                     help="Set a custom user agent")
 
+    ap.add_argument("--proxy-agent",
+                    metavar="https://agent/proxy", type=str, default=None,
+                    help="Proxy agent URL. This is NOT standrad http/s proxy. Pass 'u' parameter to agent for proxying. Not enabled by default. "
+                            "Enable this you can not download kemono and commer at once.")
+
     args = vars(ap.parse_args())
+    args['cookie_domains'] = {'kemono': None, 'coomer': None}
 
     # takes a comma seperated lost of cookie files and loads them into a cookie jar
     if args['cookies']:
         cookie_files = [s.strip() for s in args["cookies"].split(",")]
         args['cookies'] = MozillaCookieJar()
+        loaded_cookies = MozillaCookieJar()
         loaded = 0
         for cookie_file in cookie_files:
             try:
-                args['cookies'].load(cookie_file)
+                loaded_cookies.load(cookie_file)
                 loaded += 1
             except LoadError:
                 print(F"Unable to load cookie {cookie_file}")
@@ -217,7 +233,26 @@ def get_args():
                 print(F"Unable to find cookie {cookie_file}")
         if loaded == 0:
             print("No cookies loaded | exiting"), exit()
+        # make sure cookies are wildcard for better compatibility
+        for cookie in loaded_cookies:
+            args['cookie_domains']['kemono'] = args['cookie_domains']['kemono'] or (
+                match := re.search(r'^(?:www)?\.?(kemono\.(?:party|su))$', cookie.domain)) and match.group(1)
+            args['cookie_domains']['coomer'] = args['cookie_domains']['coomer'] or (
+                match := re.search(r'^(?:www)?\.?(coomer\.(?:party|su))$', cookie.domain)) and match.group(1)
+            
+            if cookie.domain.startswith('www.'):
+                cookie.domain = cookie.domain[3:]
+                cookie.domain_specified = True
+                cookie.domain_initial_dot = True
+            elif not cookie.domain.startswith('.'):
+                cookie.domain = f'.{cookie.domain}'
+                cookie.domain_specified = True
+                cookie.domain_initial_dot = True
+            args['cookies'].set_cookie(cookie)
 
+    if (not args['cookie_domains']['kemono'] and (args['kemono_fav_users'] or args['kemono_fav_posts'])) or (
+        not args['cookie_domains']['coomer'] and (args['coomer_fav_users'] or args['coomer_fav_posts'])):
+        print(f"Bad cookie file | Unable to detect domain when download favorites"), exit()
     # takes a comma seperated string of links and converts them to a list
     if args['links']:
         args['links'] = [s.strip().split('?')[0] for s in args["links"].split(",")]
@@ -305,5 +340,22 @@ def get_args():
         if len(temp) == 0:
             print(f"--coomer-fav-users no valid options were passed")
         args['coomer_fav_users'] = temp
+
+    if args['proxy_agent']:
+        u = urlparse(args['proxy_agent'])
+        if not u.netloc or not u.path:
+            print(f"Bad proxy agent url | Url shoule be something like https://example.com/agent"), exit()
+        if not u.scheme:
+            u.scheme = 'http'
+        args['proxy_agent'] = urlunparse(u)
+
+        # we should change cookie domain to proxy agent
+        new_cookies = MozillaCookieJar()
+        for cookie in args['cookies']:
+            cookie.domain = f'.{u.netloc}'
+            cookie.domain_specified = True
+            cookie.domain_initial_dot = True
+            new_cookies.set_cookie(cookie)
+        args['cookies'] = new_cookies
 
     return args
